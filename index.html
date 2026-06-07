@@ -180,12 +180,14 @@
   </div>
 
   <footer>
-    Powered by <a href="https://huggingface.co/spaces/Sakshi2005/Water-Quality-Classification" target="_blank">Random Forest ML Model</a>
+    Powered by Random Forest ML Model (runs in your browser)
     &nbsp;·&nbsp; Dataset: <a href="https://www.kaggle.com/adityakadiwal/water-potability" target="_blank">Kaggle Water Potability</a>
   </footer>
 </div>
 
 <script>
+  let MODEL = null;
+
   const PARAMS = [
     { id:"ph",      label:"pH",                   min:0,    max:14,    step:0.01, def:7.08  },
     { id:"hard",    label:"Hardness (mg/L)",       min:47,   max:323,   step:0.1,  def:196   },
@@ -222,49 +224,80 @@
     );
   }
 
+  function scaleFeatures(values) {
+    const { mean, scale } = MODEL.scaler;
+    return values.map((v, i) => (v - mean[i]) / scale[i]);
+  }
+
+  function predictTree(tree, x) {
+    let node = 0;
+    while (tree.children_left[node] !== -1) {
+      const f = tree.feature[node];
+      node = x[f] <= tree.threshold[node]
+        ? tree.children_left[node]
+        : tree.children_right[node];
+    }
+    const counts = tree.value[node][0];
+    const total = counts[0] + counts[1];
+    return total === 0 ? 0 : counts[1] / total;
+  }
+
+  function predictLocal(values) {
+    const x = scaleFeatures(values);
+    let safeSum = 0;
+    for (const tree of MODEL.trees) {
+      safeSum += predictTree(tree, x);
+    }
+    const safePct = (safeSum / MODEL.trees.length) * 100;
+    return {
+      potable: safePct >= 50,
+      safePct,
+      unsafePct: 100 - safePct,
+    };
+  }
+
+  async function loadModel() {
+    const btn = document.getElementById('predictBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Loading model…';
+    try {
+      const res = await fetch('model.json');
+      if (!res.ok) throw new Error('model.json not found');
+      MODEL = await res.json();
+      btn.disabled = false;
+      btn.innerHTML = '🔬 Analyze Water Quality';
+    } catch (e) {
+      btn.innerHTML = 'Model failed to load';
+    }
+  }
+
   async function predict() {
     const btn = document.getElementById('predictBtn');
     const res = document.getElementById('result');
+
+    if (!MODEL) {
+      res.className = 'not-potable';
+      res.innerHTML = '<p style="color:#f87171">⚠️ Model is still loading. Please wait a moment.</p>';
+      res.style.display = 'block';
+      return;
+    }
+
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Analyzing…';
     res.style.display = 'none';
 
     const values = PARAMS.map(p => parseFloat(document.getElementById(p.id).value));
 
-    try {
-      const response = await fetch(
-        'https://sakshi2005-water-quality-classification.hf.space/run/predict',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data: values })
-        }
-      );
-      const json = await response.json();
-      const md   = json.data[0];
+    await new Promise(r => setTimeout(r, 300));
 
-      // Parse probability from returned markdown
-      const safeMatch   = md.match(/Safe probability[^*]*\*\*([\d.]+)%\*\*/);
-      const unsafeMatch = md.match(/Unsafe probability[^*]*\*\*([\d.]+)%\*\*/);
-      const isPotable   = md.includes('POTABLE —');
+    const { potable, safePct, unsafePct } = predictLocal(values);
+    showResult(potable, safePct, unsafePct, MODEL.accuracy, MODEL.n_estimators);
 
-      const safePct   = safeMatch   ? parseFloat(safeMatch[1])   : (isPotable ? 65 : 35);
-      const unsafePct = unsafeMatch ? parseFloat(unsafeMatch[1]) : (100 - safePct);
-
-      showResult(isPotable, safePct, unsafePct);
-    } catch(e) {
-      res.className = 'not-potable';
-      res.innerHTML = `<p style="color:#f87171">⚠️ Could not connect to the model API.<br>
-        <small>Make sure the <a href="https://huggingface.co/spaces/Sakshi2005/Water-Quality-Classification"
-        target="_blank" style="color:#38bdf8">HF Space is running</a>.</small></p>`;
-      res.style.display = 'block';
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = '🔬 Analyze Water Quality';
-    }
+    btn.disabled = false;
+    btn.innerHTML = '🔬 Analyze Water Quality';
   }
 
-  function showResult(potable, safePct, unsafePct) {
+  function showResult(potable, safePct, unsafePct, accuracy, nTrees) {
     const res = document.getElementById('result');
     res.className = potable ? 'potable' : 'not-potable';
     res.style.display = 'block';
@@ -288,7 +321,7 @@
           <div class="bar-fill" style="width:0%" id="bar"></div>
         </div>
       </div>
-      <p class="model-note">Model: Random Forest (500 trees) · Test Accuracy ~68%</p>
+      <p class="model-note">Model: Random Forest (${nTrees} trees) · Test Accuracy ~${accuracy}%</p>
     `;
     // Animate bar
     setTimeout(() => {
@@ -298,6 +331,8 @@
                 : 'linear-gradient(90deg,#f87171,#ef4444)';
     }, 50);
   }
+
+  loadModel();
 </script>
 </body>
 </html>
